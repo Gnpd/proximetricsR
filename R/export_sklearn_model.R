@@ -45,10 +45,15 @@
 #' equivalent reconstructible via a plain \code{Pipeline.predict(X)} call. A
 #' clear, named error is raised for:
 #' \itemize{
-#'   \item any \code{fit_plsr()}/\code{fit_xlsr()} model, or
-#'     \code{prep_derivative()}/\code{prep_smooth()} step, using
-#'     \code{type}/\code{algorithm = "nwp"} (BUCHI NIRWise PLUS exact-match math
-#'     has no chemotools equivalent);
+#'   \item \code{prep_derivative()}/\code{prep_smooth()} steps using
+#'     \code{algorithm = "nwp"} (BUCHI NIRWise PLUS exact-match preprocessing
+#'     math has no chemotools equivalent) -- note this restriction does *not*
+#'     apply to \code{fit_plsr()}/\code{fit_xlsr()}'s own \code{type = "nwp"}:
+#'     predictions from an \code{"nwp"}-type model are numerically identical to
+#'     a \code{"modified"}-type model fitted on the same data (the two only
+#'     differ in the internal score-space representation, not in
+#'     \code{coefficients}/\code{intercept}), so \code{type = "nwp"} models
+#'     export the same as \code{"modified"} ones;
 #'   \item \code{prep_derivative(algorithm = "gap-segment")} (its chemotools
 #'     equivalent, \code{NorrisWilliams}, precomputes an internal kernel that
 #'     has not yet been verified to reproduce correctly from R);
@@ -111,13 +116,6 @@ export_sklearn_model <- function(object, file = NULL) {
   model <- object$final_model$model
   if (is.null(model)) {
     stop("'object' does not contain a fitted model (object$final_model$model is NULL).")
-  }
-  if (identical(model$method$type, "nwp")) {
-    stop(
-      "export_sklearn_model() does not support fit_plsr()/fit_xlsr() with ",
-      "type = \"nwp\" (no chemotools equivalent). Use save_spectral_model()/",
-      "load_spectral_model() for a full-fidelity R-native export instead."
-    )
   }
   if (!is.null(file) && (!is.character(file) || length(file) != 1)) {
     stop("'file' must be a single character string, if provided.")

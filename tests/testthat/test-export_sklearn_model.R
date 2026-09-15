@@ -22,13 +22,34 @@ test_that("export_sklearn_model requires a spectral_model object", {
   expect_error(export_sklearn_model(list()), "'object' must be of class 'spectral_model'")
 })
 
-test_that("export_sklearn_model rejects nwp-based models", {
+test_that("export_sklearn_model accepts nwp-type models (identical coefficients to modified)", {
+  recipe <- preprocess_recipe(prep_snv())
   nwp_model <- calibrate(
     X, Y,
-    data = dat, preprocess = preprocess_recipe(prep_snv()),
+    data = dat, preprocess = recipe,
     method = fit_plsr(5, "nwp"), control = calibration_control("none"), verbose = FALSE
   )
-  expect_error(export_sklearn_model(nwp_model), 'type = "nwp"')
+  modified_model <- calibrate(
+    X, Y,
+    data = dat, preprocess = recipe,
+    method = fit_plsr(5, "modified"), control = calibration_control("none"), verbose = FALSE
+  )
+
+  json <- export_sklearn_model(nwp_model)
+  doc <- jsonlite::fromJSON(json, simplifyVector = FALSE)
+  model_step <- doc$params$steps[[length(doc$params$steps)]][[2]]
+
+  expect_equal(model_step$params$type, "nwp")
+  expect_equal(
+    unlist(model_step$attributes$coef_),
+    unname(modified_model$final_model$model$coefficients[5, ]),
+    tolerance = 1e-8
+  )
+  expect_equal(
+    model_step$attributes$intercept_,
+    unname(modified_model$final_model$model$intercept)[1],
+    tolerance = 1e-8
+  )
 })
 
 test_that("export_sklearn_model rejects nwp preprocessing steps", {
