@@ -40,9 +40,13 @@ test_that("export_sklearn_model accepts nwp-type models (identical coefficients 
   model_step <- doc$params$steps[[length(doc$params$steps)]][[2]]
 
   expect_equal(model_step$params$type, "nwp")
+  # coef_ absorbs the prep_snv() sample-vs-population SD factor, since
+  # chemotools' StandardNormalVariate divides by the population SD.
+  n_features <- length(nwp_model$final_model$model$x_means)
+  snv_scale <- sqrt((n_features - 1) / n_features)
   expect_equal(
     unlist(model_step$attributes$coef_),
-    unname(modified_model$final_model$model$coefficients[5, ]),
+    unname(modified_model$final_model$model$coefficients[5, ]) * snv_scale,
     tolerance = 1e-8
   )
   expect_equal(
@@ -123,18 +127,30 @@ test_that("export_sklearn_model produces the expected Pipeline JSON shape", {
 
   expect_equal(doc$estimator_class, "Pipeline")
   steps <- doc$params$steps
-  expect_length(steps, length(base_recipe$steps) + 1)
+  # one step per recipe step, plus the model, plus the extra RangeCut emitted to
+  # reproduce the edge points prep_derivative() drops but SavitzkyGolay keeps.
+  expect_length(steps, length(base_recipe$steps) + 2)
 
   step_classes <- sapply(steps, function(s) s[[2]]$estimator_class)
   expect_equal(
     unlist(step_classes),
-    c("RangeCut", "StandardNormalVariate", "SavitzkyGolay", "NIRWiseLinearModel")
+    c(
+      "RangeCut", "StandardNormalVariate", "SavitzkyGolay", "RangeCut",
+      "NIRWiseLinearModel"
+    )
   )
 
   model_step <- steps[[length(steps)]][[2]]
   expect_equal(model_step$params$fit_method, "plsr")
   expect_equal(model_step$params$type, "standard")
   expect_length(model_step$attributes$coef_, length(model$final_model$model$x_means))
+  # the coefficient axis travels as wavenumbers_, never as scikit-learn's
+  # feature_names_in_ (which the model step can never satisfy -- see
+  # export_sklearn_model.R)
+  expect_length(
+    model_step$attributes$wavenumbers_, length(model$final_model$model$x_means)
+  )
+  expect_null(model_step$attributes$feature_names_in_)
 
   expect_equal(doc$metadata$domain, "sklearn")
   expect_equal(doc$metadata$source, "proximetricsR")
@@ -145,4 +161,38 @@ test_that("export_sklearn_model can write to a file", {
   result <- export_sklearn_model(model, file = file)
   expect_true(file.exists(file))
   expect_equal(as.character(result), paste(readLines(file), collapse = "\n"))
+})
+
+test_that("export_sklearn_model matches openmodels' documented dict shape", {
+  # https://github.com/Gnpd/openmodels/blob/main/docs/format.md
+  json <- export_sklearn_model(model)
+  doc <- jsonlite::fromJSON(json, simplifyVector = FALSE)
+
+  # metadata is root-only and never duplicated on nested sub-estimators.
+  expect_true("metadata" %in% names(doc))
+
+  for (step in doc$params$steps) {
+    est <- step[[2]]
+    expect_false("metadata" %in% names(est))
+    # every param carries a type, so values JSON cannot represent natively
+    # survive the round trip
+    # as.character() so a block that is absent or empty reads as character(0)
+    expect_setequal(
+      as.character(names(est$param_types)), as.character(names(est$params))
+    )
+    # openmodels indexes data["attribute_types"] directly once "attributes" is
+    # present, so the two must always be emitted together
+    if (!is.null(est$attributes)) expect_false(is.null(est$attribute_types))
+  }
+
+  # producers lists exactly the packages contributing a class to this tree
+  expect_equal(
+    names(doc$metadata$producers),
+    c("chemotools", "proximetricsr_estimators", "sklearn")
+  )
+  expect_equal(doc$metadata$producer_name, "sklearn")
+  expect_equal(doc$metadata$openmodels_format_version, 2)
+  # absent on purpose: R cannot know the scikit-learn version that will load
+  # this file, and openmodels skips its check when the field is missing.
+  expect_null(doc$metadata$producer_version)
 })

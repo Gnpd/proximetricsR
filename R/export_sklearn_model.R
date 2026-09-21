@@ -122,12 +122,55 @@ export_sklearn_model <- function(object, file = NULL) {
   }
 
   steps <- object$preprocess$steps
-  step_docs <- vector("list", length(steps))
+  step_docs <- list()
+  # prep_snv() standardises with the sample SD (denominator n - 1, R's sd());
+  # chemotools' StandardNormalVariate uses numpy's population SD (denominator
+  # n). The two therefore differ by a constant factor, tracked here and folded
+  # exactly into the final affine model step below rather than left as a silent
+  # ~0.2% scale error in every prediction.
+  snv_scale <- 1
   for (i in seq_along(steps)) {
     x_axis_in <- as.numeric(object$processed_wavs[[paste0("step_", i - 1)]])
-    translated <- .translate_prep_step(steps[[i]], x_axis_in)
+    x_axis_out <- as.numeric(object$processed_wavs[[paste0("step_", i)]])
+    translated <- .translate_prep_step(steps[[i]], x_axis_in, x_axis_out)
     step_name <- paste0("step", i, "_", gsub("^prep_", "", steps[[i]]$method))
-    step_docs[[i]] <- list(step_name, translated)
+    step_docs[[length(step_docs) + 1L]] <- list(step_name, translated)
+
+    if (identical(translated$estimator_class, "StandardNormalVariate")) {
+      # SNV is scale-invariant, so any factor carried in here is absorbed.
+      snv_scale <- sqrt((length(x_axis_in) - 1) / length(x_axis_in))
+    } else if (!isTRUE(all.equal(snv_scale, 1))) {
+      # Only steps that commute with a scalar multiple can carry the factor
+      # forward to the model.
+      if (!translated$estimator_class %in% c(
+        "SavitzkyGolay", "SavitzkyGolayFilter", "MeanFilter",
+        "RangeCut", "PolynomialCorrection"
+      )) {
+        stop(
+          "export_sklearn_model() cannot reproduce prep_snv() exactly when it is ",
+          "followed by a non-linear step (here '", steps[[i]]$method, "'): ",
+          "prep_snv() uses the sample standard deviation while chemotools' ",
+          "StandardNormalVariate uses the population one, and the resulting ",
+          "constant factor cannot be carried through that step. Reorder the ",
+          "recipe so prep_snv() is not followed by prep_transform(), or use ",
+          "save_spectral_model()/load_spectral_model() instead."
+        )
+      }
+    }
+
+    # proximetricsR's moving-window filters drop the (w - 1) / 2 edge points the
+    # window cannot cover, so the step narrows the x-axis. Their chemotools
+    # counterparts pad instead and are length-preserving, which leaves the
+    # Python pipeline handing the next step more features than it was fitted on.
+    # Emit an explicit RangeCut reproducing R's own recorded output grid.
+    if (translated$estimator_class %in%
+      c("SavitzkyGolay", "SavitzkyGolayFilter", "MeanFilter") &&
+      length(x_axis_out) != length(x_axis_in)) {
+      step_docs[[length(step_docs) + 1L]] <- list(
+        paste0(step_name, "_trim"),
+        .make_range_cut(x_axis_in, x_axis_out)
+      )
+    }
   }
 
   model_step <- list(
@@ -137,33 +180,62 @@ export_sklearn_model <- function(object, file = NULL) {
       params = list(
         fit_method = model$method$fit_method,
         type = model$method$type,
-        ncomp = object$final_ncomp,
-        min_w = model$method$min_w,
-        max_w = model$method$max_w
+        ncomp = as.integer(object$final_ncomp),
+        min_w = if (is.null(model$method$min_w)) NULL else as.integer(model$method$min_w),
+        max_w = if (is.null(model$method$max_w)) NULL else as.integer(model$method$max_w)
+      ),
+      # NIRWiseLinearModel constrains min_w/max_w to Interval(Integral, ...), so
+      # they must not arrive as floats.
+      param_types = list(
+        fit_method = "str",
+        type = "str",
+        ncomp = "int",
+        min_w = if (is.null(model$method$min_w)) "NoneType" else "int",
+        max_w = if (is.null(model$method$max_w)) "NoneType" else "int"
       ),
       attributes = list(
-        x_means_ = unname(model$x_means),
-        coef_ = unname(model$coefficients[object$final_ncomp, ]),
+        # x_means_ / coef_ absorb the prep_snv() sample-vs-population SD factor
+        # (snv_scale; 1 when the recipe has no prep_snv step): R predicts on
+        # X_R = snv_scale * X_python, and
+        # (snv_scale * X_py - x_means) %*% coef == (X_py - x_means / snv_scale)
+        # %*% (snv_scale * coef), leaving the intercept untouched.
+        x_means_ = unname(model$x_means) / snv_scale,
+        coef_ = unname(model$coefficients[object$final_ncomp, ]) * snv_scale,
         intercept_ = unname(model$intercept)[1],
         n_features_in_ = length(model$x_means),
-        feature_names_in_ = object$predictor_variables
+        # The coefficient axis is provenance, deliberately NOT emitted as
+        # scikit-learn's feature_names_in_: the model step always receives a
+        # plain array from the preceding chemotools transformer, so that
+        # attribute can never be satisfied -- it warns on every predict() with
+        # array input, and raises ValueError under set_output("pandas"), where
+        # the upstream transformer relabels the columns "x0", "x1", ...
+        wavenumbers_ = as.numeric(object$processed_wavs[[paste0("step_", length(steps))]])
       ),
       attribute_types = list(
         x_means_ = "ndarray",
         coef_ = "ndarray",
         intercept_ = "float",
         n_features_in_ = "int",
-        feature_names_in_ = "ndarray"
+        wavenumbers_ = "ndarray"
       ),
       attribute_dtypes = list(
         x_means_ = "float64",
         coef_ = "float64",
-        feature_names_in_ = "object"
+        wavenumbers_ = "float64"
       )
     )
   )
 
   all_steps <- c(step_docs, list(model_step))
+
+  step_classes <- vapply(all_steps, function(s) s[[2]]$estimator_class, character(1))
+  producer_packages <- sort(unique(c(
+    "sklearn", # the root Pipeline itself
+    ifelse(
+      step_classes %in% c("NIRWiseLinearModel", "ProximetricsPLS", "ProximetricsXLS"),
+      "proximetricsr_estimators", "chemotools"
+    )
+  )))
   # openmodels' generic deserializer only recurses into a nested (name, estimator)
   # pair when its type is tagged as a *list* of ("str", <EstimatorClass>) pairs in
   # param_types -- this must be supplied explicitly here since these dicts are
@@ -184,11 +256,21 @@ export_sklearn_model <- function(object, file = NULL) {
       verbose = "bool"
     ),
     metadata = list(
+      # "the top-level package the *outermost* model class belongs to": the root
+      # estimator is sklearn.pipeline.Pipeline, so this is "sklearn" -- the same
+      # value openmodels itself writes for this object. proximetricsR's own
+      # authorship is recorded in "source"/"proximetricsR_version" below.
+      #
+      # "producer_version" (the scikit-learn version at serialize time) is
+      # deliberately absent: R cannot know which scikit-learn will load the file,
+      # and openmodels skips its version-mismatch check on a missing value while
+      # a placeholder like "unknown" would warn on every load.
       producer_name = "sklearn",
-      producers = list(
-        sklearn = "unknown",
-        chemotools = "unknown",
-        proximetricsr_estimators = "unknown"
+      # One entry per package contributing an estimator class anywhere in the
+      # tree. Versions are "unknown" (a lookup openmodels also falls back to),
+      # since these are Python packages not installed on the exporting machine.
+      producers = stats::setNames(
+        as.list(rep("unknown", length(producer_packages))), producer_packages
       ),
       domain = "sklearn",
       openmodels_format_version = 2L,
@@ -219,17 +301,26 @@ export_sklearn_model <- function(object, file = NULL) {
 #' step (\code{object$processed_wavs[[paste0("step_", i - 1)]]}), used only by
 #' steps whose chemotools equivalent needs an explicit x-axis (currently
 #' \code{prep_wav_trim}).
+#' @param x_axis_out numeric vector of the grid R recorded *leaving* this step
+#' (\code{object$processed_wavs[[paste0("step_", i)]]}), used by
+#' \code{prep_wav_trim} to reproduce R's own cut exactly.
 #' @return A list with \code{estimator_class} and \code{params} (and, where
 #' relevant, \code{param_types}/\code{param_dtypes}) describing the equivalent
 #' chemotools transformer.
+#' @note Any branch that sets \code{attributes} must also set
+#' \code{attribute_types}: openmodels indexes \code{data["attribute_types"]}
+#' directly (not via \code{.get()}) once \code{attributes} is present, so a
+#' missing one is a \code{KeyError} at load time. Every other block is optional
+#' -- the deserializer defaults it to an empty dict -- so blocks that would be
+#' empty are simply left out.
 #' @keywords internal
-.translate_prep_step <- function(step, x_axis_in) {
+.translate_prep_step <- function(step, x_axis_in, x_axis_out) {
   n_features_in <- length(x_axis_in)
 
   switch(step$method,
     prep_snv = list(
       estimator_class = "StandardNormalVariate",
-      params = list(),
+      params = .empty_obj(),
       # StandardNormalVariate.fit() sets no fitted state beyond n_features_in_
       # (mean/std are computed per-row at transform time, not stored).
       attributes = list(n_features_in_ = n_features_in),
@@ -247,7 +338,17 @@ export_sklearn_model <- function(object, file = NULL) {
         # window_length_/polyorder_/deriv_ (no other computed state) + n_features_in_.
         list(
           estimator_class = "SavitzkyGolay",
-          params = list(window_length = step$w, polyorder = step$p, deriv = step$m),
+          # `mode` is pinned to chemotools' own default rather than left implicit,
+          # so the export keeps reproducing R if that default ever changes. R
+          # trims the edge points this padding produces (see the RangeCut that
+          # export_sklearn_model() appends), so the mode never affects results.
+          params = list(
+            window_length = as.integer(step$w), polyorder = as.integer(step$p),
+            deriv = as.integer(step$m), mode = "nearest"
+          ),
+          param_types = list(
+            window_length = "int", polyorder = "int", deriv = "int", mode = "str"
+          ),
           attributes = list(
             window_length_ = step$w, polyorder_ = step$p, deriv_ = step$m,
             n_features_in_ = n_features_in
@@ -295,7 +396,10 @@ export_sklearn_model <- function(object, file = NULL) {
         kernel <- rev(as.vector(sgf(p = step$p, n = step$w, m = 0)))
         list(
           estimator_class = "SavitzkyGolayFilter",
-          params = list(window_length = step$w, polyorder = step$p),
+          params = list(
+            window_length = as.integer(step$w), polyorder = as.integer(step$p)
+          ),
+          param_types = list(window_length = "int", polyorder = "int"),
           attributes = list(
             window_length_ = step$w,
             polyorder_ = step$p,
@@ -321,7 +425,8 @@ export_sklearn_model <- function(object, file = NULL) {
         # is computed at transform time via scipy's uniform_filter1d) + n_features_in_.
         list(
           estimator_class = "MeanFilter",
-          params = list(window_length = step$w),
+          params = list(window_length = as.integer(step$w)),
+          param_types = list(window_length = "int"),
           attributes = list(window_length_ = step$w, n_features_in_ = n_features_in),
           attribute_types = list(window_length_ = "int", n_features_in_ = "int")
         )
@@ -331,7 +436,8 @@ export_sklearn_model <- function(object, file = NULL) {
     },
     prep_detrend = list(
       estimator_class = "PolynomialCorrection",
-      params = list(order = step$p, indices = NULL),
+      params = list(order = as.integer(step$p), indices = NULL),
+      param_types = list(order = "int", indices = "NoneType"),
       # indices = NULL fits the polynomial to every point (matching prospectr::
       # detrend's whole-spectrum behaviour), i.e. indices_ = 0:(n_features_in_-1)
       # (0-based, matching PolynomialCorrection.fit()'s own `list(range(0, len(X[0])))`).
@@ -358,6 +464,7 @@ export_sklearn_model <- function(object, file = NULL) {
       list(
         estimator_class = "IntensityConversion",
         params = list(input_unit = "reflectance", output_unit = "pseudoabsorbance"),
+        param_types = list(input_unit = "str", output_unit = "str"),
         attributes = list(n_features_in_ = n_features_in),
         attribute_types = list(n_features_in_ = "int")
       )
@@ -373,36 +480,13 @@ export_sklearn_model <- function(object, file = NULL) {
       if (length(step$band) == 0) {
         stop("export_sklearn_model() requires a non-empty 'band' in prep_wav_trim().")
       }
-      # chemotools.feature_selection.RangeCut resolves start/end to indices via
-      # nearest-value lookup (chemotools._axis_mixin.XAxisMixin._find_index:
-      # argmin(abs(axis - target))) and stores x_axis_/wavenumbers_ as
-      # x_axis[start_index_:end_index_] (Python half-open slice) -- replicated
-      # here rather than deferring index resolution to a (nonexistent) R-side fit().
-      start_index <- which.min(abs(x_axis_in - min(step$band))) - 1L
-      end_index <- which.min(abs(x_axis_in - max(step$band))) - 1L
-      selected_axis <- x_axis_in[(start_index + 1L):end_index]
-      list(
-        estimator_class = "RangeCut",
-        params = list(
-          start = min(step$band),
-          end = max(step$band),
-          x_axis = x_axis_in
-        ),
-        param_types = list(x_axis = "ndarray"),
-        param_dtypes = list(x_axis = "float64"),
-        attributes = list(
-          start_index_ = start_index,
-          end_index_ = end_index,
-          x_axis_ = selected_axis,
-          wavenumbers_ = selected_axis,
-          n_features_in_ = n_features_in
-        ),
-        attribute_types = list(
-          start_index_ = "int", end_index_ = "int",
-          x_axis_ = "ndarray", wavenumbers_ = "ndarray", n_features_in_ = "int"
-        ),
-        attribute_dtypes = list(x_axis_ = "float64", wavenumbers_ = "float64")
-      )
+      # The cut is derived from R's own recorded output grid rather than from a
+      # nearest-value lookup of `band`. proximetricsR keeps the wavelengths that
+      # fall *inside* the band, while chemotools' RangeCut resolves start/end to
+      # their nearest grid points and slices half-open -- for a band edge lying
+      # between two grid points the two rules disagree by one feature, in either
+      # direction. Replicating R's indices directly removes that whole class.
+      .make_range_cut(x_axis_in, x_axis_out, start = min(step$band), end = max(step$band))
     },
     prep_resample = stop(
       "export_sklearn_model() does not support prep_resample(): its chemotools ",
@@ -415,3 +499,56 @@ export_sklearn_model <- function(object, file = NULL) {
     stop("Unsupported preprocessing step '", step$method, "' for export_sklearn_model().")
   )
 }
+
+#' @title Build a RangeCut step reproducing a narrowing preprocessing step
+#' @description internal function used by \code{\link{export_sklearn_model}} to
+#' re-create, in the exported Pipeline, the edge trimming proximetricsR's
+#' moving-window filters apply but their length-preserving chemotools
+#' counterparts do not.
+#' @param x_axis_in numeric vector, the grid entering the filter step.
+#' @param x_axis_out numeric vector, the (narrower, contiguous) grid R recorded
+#' leaving that step.
+#' @param start,end optional provenance values for the emitted \code{RangeCut}'s
+#' constructor parameters (\code{prep_wav_trim()}'s requested band). The cut
+#' itself always comes from \code{x_axis_out}; these are not used to resolve it.
+#' Default to the endpoints of \code{x_axis_out}.
+#' @return A list with \code{estimator_class}, \code{params} and
+#' \code{attributes} describing an equivalent \code{chemotools} \code{RangeCut}.
+#' @keywords internal
+.make_range_cut <- function(x_axis_in, x_axis_out, start = NULL, end = NULL) {
+  n_out <- length(x_axis_out)
+  if (is.null(start)) start <- x_axis_out[1]
+  if (is.null(end)) end <- x_axis_out[n_out]
+  # Indices are derived from R's own recorded output grid rather than left to
+  # RangeCut.fit()'s nearest-value lookup, so the exported cut is exact.
+  start_index <- which.min(abs(x_axis_in - x_axis_out[1])) - 1L
+  end_index <- start_index + n_out # Python half-open slice
+  selected_axis <- x_axis_in[(start_index + 1L):end_index]
+  list(
+    estimator_class = "RangeCut",
+    params = list(start = start, end = end, x_axis = x_axis_in),
+    param_types = list(start = "float", end = "float", x_axis = "ndarray"),
+    param_dtypes = list(x_axis = "float64"),
+    attributes = list(
+      start_index_ = start_index,
+      end_index_ = end_index,
+      x_axis_ = selected_axis,
+      wavenumbers_ = selected_axis,
+      n_features_in_ = length(x_axis_in)
+    ),
+    attribute_types = list(
+      start_index_ = "int", end_index_ = "int",
+      x_axis_ = "ndarray", wavenumbers_ = "ndarray", n_features_in_ = "int"
+    ),
+    attribute_dtypes = list(x_axis_ = "float64", wavenumbers_ = "float64")
+  )
+}
+
+#' @title An empty JSON object
+#' @description internal helper. \code{jsonlite::toJSON()} encodes an unnamed
+#' \code{list()} as \code{"[]"}, but openmodels' format expects a JSON object
+#' (\code{"{}"}) everywhere one of its bookkeeping dicts is empty.
+#' @return A zero-length named list.
+#' @keywords internal
+.empty_obj <- function() stats::setNames(list(), character(0))
+
