@@ -7,7 +7,7 @@
 #'
 #' \loadmathjax
 #'
-#' \code{save_spectral_model} writes a fitted \code{\link{spectral_model}} object to
+#' \code{save_spectral_model} writes a fitted \code{\link[=calibrate]{spectral_model}} object to
 #' a portable, versioned, human-readable JSON file. \code{load_spectral_model} reads
 #' it back into an object usable with \code{\link{predict.spectral_model}}.
 #'
@@ -63,15 +63,15 @@
 #'
 #' @examples
 #' \donttest{
-#' data("NIRcannabis")
+#' data("proximateCannabis")
 #' model <- calibrate(CBDA ~ spc,
-#'   data = NIRcannabis, preprocess = preprocess_recipe(prep_snv()),
+#'   data = proximateCannabis, preprocess = preprocess_recipe(prep_snv()),
 #'   method = fit_plsr(5), control = calibration_control("none"), verbose = FALSE
 #' )
 #' file <- tempfile(fileext = ".json")
 #' save_spectral_model(model, file)
 #' reloaded <- load_spectral_model(file)
-#' predict(reloaded, newdata = NIRcannabis[1:5, ], verbose = FALSE)
+#' predict(reloaded, newdata = proximateCannabis[1:5, ], verbose = FALSE)
 #' }
 #' @author Leonardo Ramirez-Lopez
 #' @export

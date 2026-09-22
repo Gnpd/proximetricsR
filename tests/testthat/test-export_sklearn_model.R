@@ -1,6 +1,6 @@
-data("NIRcannabis", package = "proximetricsR")
+data("proximateCannabis", package = "proximetricsR")
 
-dat <- NIRcannabis[41:80, ]
+dat <- proximateCannabis[41:80, ]
 X <- dat$spc
 rownames(X) <- NULL
 Y <- matrix(dat$THC, dimnames = list(41:80, "THC"))

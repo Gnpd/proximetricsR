@@ -5,7 +5,7 @@
 #'
 #' \loadmathjax
 #'
-#' Serializes a \code{\link{spectral_model}} object into openmodels-shaped JSON
+#' Serializes a \code{\link[=calibrate]{spectral_model}} object into openmodels-shaped JSON
 #' whose \code{estimator_class} values are real scikit-learn/chemotools class
 #' names, so it can be loaded directly in Python as a working
 #' \code{sklearn.pipeline.Pipeline} via
@@ -94,14 +94,14 @@
 #'
 #' @examples
 #' \donttest{
-#' data("NIRcannabis")
+#' data("proximateCannabis")
 #' recipe <- preprocess_recipe(
 #'   prep_wav_trim(band = c(1100, 1600)),
 #'   prep_snv(),
 #'   device = "unspecified"
 #' )
 #' model <- calibrate(CBDA ~ spc,
-#'   data = NIRcannabis, preprocess = recipe,
+#'   data = proximateCannabis, preprocess = recipe,
 #'   method = fit_plsr(5, type = "standard"),
 #'   control = calibration_control("none"), verbose = FALSE
 #' )
