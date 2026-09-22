@@ -80,3 +80,85 @@ test_that("load_spectral_model errors on a file that is not a spectral_model exp
   writeLines('{"estimator_class": "SomethingElse"}', file)
   expect_error(load_spectral_model(file), "does not look like a proximetricsR spectral_model")
 })
+
+# A recipe with a *vector-valued* step parameter (band) and a step that narrows
+# the grid, so the round trip covers both param simplification and processed_wavs.
+trim_recipe <- preprocess_recipe(
+  prep_wav_trim(band = c(1100, 1600)),
+  prep_snv(),
+  prep_derivative(m = 1, w = 11, p = 2, algorithm = "savitzky-golay"),
+  device = "unspecified"
+)
+trim_model <- calibrate(
+  X, Y,
+  data = dat, preprocess = trim_recipe, method = fit_plsr(3, "standard"),
+  control = calibration_control("none"), verbose = FALSE
+)
+
+test_that("load_spectral_model restores vector-valued step parameters as atomic", {
+  file <- tempfile(fileext = ".json")
+  save_spectral_model(trim_model, file)
+  reloaded <- load_spectral_model(file)
+
+  band <- reloaded$preprocess$steps[[1]]$band
+  # read back with simplifyVector = FALSE, a JSON array arrives as a list and
+  # reaches the step executor as one, where min()/max() fail
+  expect_true(is.numeric(band))
+  expect_equal(band, c(1100, 1600))
+  expect_equal(
+    predict(reloaded, newdata = X, verbose = FALSE)$predictions,
+    predict(trim_model, newdata = X, verbose = FALSE)$predictions
+  )
+})
+
+test_that("save_spectral_model/load_spectral_model round-trips processed_wavs", {
+  file <- tempfile(fileext = ".json")
+  save_spectral_model(trim_model, file)
+  reloaded <- load_spectral_model(file)
+
+  # one entry per step, plus the incoming grid
+  expect_named(reloaded$processed_wavs, paste0("step_", 0:length(trim_recipe$steps)))
+  expect_equal(
+    lapply(reloaded$processed_wavs, as.numeric),
+    lapply(trim_model$processed_wavs, as.numeric)
+  )
+})
+
+test_that("the JSON round trip is bit-exact, not merely close", {
+  # jsonlite's digits = NA writes 15 significant digits, which loses up to ~22
+  # ULP on a float64; the writers use digits = I(17) so doubles read back identical.
+  file <- tempfile(fileext = ".json")
+  save_spectral_model(trim_model, file)
+  reloaded <- load_spectral_model(file)
+
+  expect_identical(
+    reloaded$final_model$model$coefficients,
+    trim_model$final_model$model$coefficients
+  )
+  expect_identical(
+    predict(reloaded, newdata = X, verbose = FALSE)$predictions,
+    predict(trim_model, newdata = X, verbose = FALSE)$predictions
+  )
+})
+
+test_that("a reloaded model re-exports to an identical sklearn pipeline", {
+  file <- tempfile(fileext = ".json")
+  save_spectral_model(trim_model, file)
+  reloaded <- load_spectral_model(file)
+
+  strip_created <- function(j) sub('"created_at":"[^"]*"', "", j)
+  expect_identical(
+    strip_created(export_sklearn_model(reloaded)),
+    strip_created(export_sklearn_model(trim_model))
+  )
+})
+
+test_that("export_sklearn_model refuses a model with no processed_wavs", {
+  # predict() recomputes the grid, so a model from a format_version 1 file
+  # predicts fine but cannot be re-exported; without the guard that wrote a
+  # structurally valid pipeline whose coefficients were all null
+  stripped <- trim_model
+  stripped$processed_wavs <- NULL
+
+  expect_error(export_sklearn_model(stripped), "processed wavelength grid")
+})

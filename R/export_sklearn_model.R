@@ -122,6 +122,24 @@ export_sklearn_model <- function(object, file = NULL) {
   }
 
   steps <- object$preprocess$steps
+  # Every step is translated against the grid entering it, and the model step
+  # against the grid leaving the last one, so "step_0" .. "step_N" must all be
+  # present. predict() does not need them, so a model reloaded from a
+  # format_version 1 file predicts fine but cannot be re-exported -- without
+  # this check that produced a structurally valid file full of nulls.
+  needed <- paste0("step_", seq_len(length(steps) + 1L) - 1L)
+  if (!all(needed %in% names(object$processed_wavs))) {
+    stop(
+      "'object' does not carry the processed wavelength grid its preprocessing ",
+      "steps were applied on (object$processed_wavs is missing ",
+      sum(!needed %in% names(object$processed_wavs)), " of ", length(needed),
+      " entries), so the x-axis of each exported step cannot be determined. ",
+      "Models read with load_spectral_model() from a file written before ",
+      "proximetricsR recorded that grid are affected: re-run ",
+      "save_spectral_model() on the calibrated model, or export directly from ",
+      "the object calibrate() returned."
+    )
+  }
   step_docs <- list()
   # prep_snv() standardises with the sample SD (denominator n - 1, R's sd());
   # chemotools' StandardNormalVariate uses numpy's population SD (denominator
@@ -278,7 +296,10 @@ export_sklearn_model <- function(object, file = NULL) {
   )
 
   wired <- .to_wire(doc)
-  json <- toJSON(wired, auto_unbox = TRUE, null = "null", na = "null", digits = NA)
+  # digits = I(17): jsonlite's digits = NA is 15 significant digits, which is
+  # NOT round-trip safe for a float64 (up to ~22 ULP of error). 17 is the
+  # shortest width that always reads back the identical double.
+  json <- toJSON(wired, auto_unbox = TRUE, null = "null", na = "null", digits = I(17))
 
   if (!is.null(file)) {
     writeLines(json, con = file)

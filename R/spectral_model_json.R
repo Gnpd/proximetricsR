@@ -32,8 +32,8 @@
 #' This stores the fitted \code{\link{spectral_fit}} model (\code{object$final_model$model}),
 #' its \code{\link{preprocess_recipe}}, the cross-validation tuning grid used to pick
 #' the optimal number of components (if any), and identifying fields
-#' (\code{target_variable}, \code{predictor_variables}, \code{final_ncomp}, and
-#' \code{object$metadata} if present). It intentionally does **not** store the full
+#' (\code{target_variable}, \code{predictor_variables}, \code{final_ncomp},
+#' \code{processed_wavs}, and \code{object$metadata} if present). It intentionally does **not** store the full
 #' calibration/cross-validation audit trail (per-fold predictions in \code{model_cv},
 #' \code{calibration_statistics_all}, \code{detected_outliers}, \code{initial_fit},
 #' \code{input_data}) -- only what is needed to describe and predict from the model.
@@ -113,7 +113,12 @@ save_spectral_model <- function(object, file, metadata = NULL) {
       predictor_variables = object$predictor_variables,
       final_ncomp = object$final_ncomp,
       device = object$preprocess$device,
-      preprocess = preprocess_params
+      preprocess = preprocess_params,
+      # The wavelength grid entering and leaving every preprocessing step
+      # ("step_0" .. "step_N", so one more entry than there are steps).
+      # predict() recomputes it, but export_sklearn_model() reads it directly,
+      # so a reloaded model is only re-exportable if it survives the round trip.
+      processed_wavs = lapply(object$processed_wavs, as.numeric)
     ),
     attributes = list(
       model = list(
@@ -128,7 +133,7 @@ save_spectral_model <- function(object, file, metadata = NULL) {
         producer_name = "proximetricsR",
         producer_version = as.character(utils::packageVersion("proximetricsR")),
         domain = "proximetricsR",
-        format_version = 1L,
+        format_version = 2L,
         created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
         dependency_versions = list(
           R = R.version.string,
@@ -141,7 +146,10 @@ save_spectral_model <- function(object, file, metadata = NULL) {
   )
 
   wired <- .to_wire(doc)
-  json <- toJSON(wired, auto_unbox = TRUE, null = "null", na = "null", digits = NA)
+  # digits = I(17): jsonlite's digits = NA is 15 significant digits, which is
+  # NOT round-trip safe for a float64 (up to ~22 ULP of error). 17 is the
+  # shortest width that always reads back the identical double.
+  json <- toJSON(wired, auto_unbox = TRUE, null = "null", na = "null", digits = I(17))
   writeLines(json, con = file)
   invisible(NULL)
 }
@@ -178,7 +186,7 @@ load_spectral_model <- function(file) {
   class(model) <- c("spectral_fit", "list")
 
   preprocess_steps <- lapply(doc$params$preprocess, function(step) {
-    out <- c(list(method = step$estimator_class), step$params)
+    out <- c(list(method = step$estimator_class), lapply(step$params, .simplify_param))
     class(out) <- c("preprocessing", "list")
     out
   })
@@ -206,7 +214,17 @@ load_spectral_model <- function(file) {
       }
     ),
     final_ncomp = doc$params$final_ncomp,
-    preprocess = preprocess
+    preprocess = preprocess,
+    # Absent from files written before format_version 2; left NULL there, which
+    # export_sklearn_model() reports rather than silently exporting an empty model.
+    processed_wavs = if (is.null(doc$params$processed_wavs)) {
+      NULL
+    } else {
+      structure(
+        lapply(doc$params$processed_wavs, function(w) as.numeric(unlist(w))),
+        class = c("processed_wavs", "list")
+      )
+    }
   )
 
   model_metadata <- NULL
@@ -222,6 +240,27 @@ load_spectral_model <- function(file) {
 
   class(results) <- c("spectral_model", "list")
   results
+}
+
+#' @title Rebuild an atomic vector from a JSON array of scalars
+#' @description internal helper for \code{\link{load_spectral_model}}. Steps are
+#' read with \code{simplifyVector = FALSE}, so a vector-valued preprocessing
+#' parameter -- \code{prep_wav_trim(band = c(1100, 1600))},
+#' \code{prep_resample(grid = ...)} -- comes back as a list of length-1 elements
+#' and reaches the step executor as a list, where it fails (\code{min()} of a
+#' list). Scalars are unaffected: \code{toJSON(auto_unbox = TRUE)} writes them as
+#' bare values, which read back atomic already.
+#' @param v one element of a step's \code{params}.
+#' @return \code{v} flattened to an atomic vector when it is an unnamed list of
+#' length-1 atomics; \code{v} unchanged otherwise.
+#' @keywords internal
+.simplify_param <- function(v) {
+  if (is.list(v) && is.null(names(v)) && length(v) > 0 &&
+    all(vapply(v, function(e) is.atomic(e) && length(e) == 1L, logical(1)))) {
+    unlist(v, use.names = FALSE)
+  } else {
+    v
+  }
 }
 
 # --- Internal wire-format helpers -------------------------------------------
