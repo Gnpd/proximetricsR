@@ -229,7 +229,7 @@ export_sklearn_model <- function(object, file = NULL) {
   all_steps <- c(step_docs, list(model_step))
 
   step_classes <- vapply(all_steps, function(s) s[[2]]$estimator_class, character(1))
-  producer_packages <- sort(unique(c(
+  package_names <- sort(unique(c(
     "sklearn", # the root Pipeline itself
     ifelse(
       step_classes %in% c("NIRWiseLinearModel", "ProximetricsPLS", "ProximetricsXLS"),
@@ -255,31 +255,25 @@ export_sklearn_model <- function(object, file = NULL) {
       memory = "NoneType",
       verbose = "bool"
     ),
+    # openmodels format v3 (see its docs/format.md, "Files written by other
+    # tools"): producer_* names the tool that wrote the file (ONNX convention);
+    # domain_version/packages name the Python versions whose attribute layouts
+    # this file follows, which openmodels compares against the loading
+    # environment (warning only); dependency_versions is this R session's own
+    # runtime. openmodels_version is left out -- openmodels didn't write this.
     metadata = list(
-      # "the top-level package the *outermost* model class belongs to": the root
-      # estimator is sklearn.pipeline.Pipeline, so this is "sklearn" -- the same
-      # value openmodels itself writes for this object. proximetricsR's own
-      # authorship is recorded in "source"/"proximetricsR_version" below.
-      #
-      # "producer_version" (the scikit-learn version at serialize time) is
-      # deliberately absent: R cannot know which scikit-learn will load the file,
-      # and openmodels skips its version-mismatch check on a missing value while
-      # a placeholder like "unknown" would warn on every load.
-      producer_name = "sklearn",
-      # One entry per package contributing an estimator class anywhere in the
-      # tree. Versions are "unknown" (a lookup openmodels also falls back to),
-      # since these are Python packages not installed on the exporting machine.
-      producers = stats::setNames(
-        as.list(rep("unknown", length(producer_packages))), producer_packages
-      ),
+      producer_name = "proximetricsR",
+      producer_version = as.character(utils::packageVersion("proximetricsR")),
       domain = "sklearn",
-      openmodels_format_version = 2L,
-      openmodels_version = "unknown",
+      domain_version = .sklearn_export_targets[["sklearn"]],
+      # One entry per package contributing an estimator class anywhere in the tree.
+      packages = as.list(.sklearn_export_targets[package_names]),
+      openmodels_format_version = 3L,
       created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
-      dependency_versions = list(numpy = "unknown", scipy = "unknown"),
-      source = "proximetricsR",
-      proximetricsR_version = as.character(utils::packageVersion("proximetricsR")),
-      r_version = R.version.string
+      dependency_versions = list(
+        R = as.character(getRversion()),
+        jsonlite = as.character(utils::packageVersion("jsonlite"))
+      )
     )
   )
 
@@ -292,6 +286,20 @@ export_sklearn_model <- function(object, file = NULL) {
   }
   json
 }
+
+#' @title Python package versions targeted by export_sklearn_model()
+#' @description internal constant. The scikit-learn/chemotools/
+#' proximetricsr-estimators versions whose fitted-attribute layouts
+#' \code{\link{export_sklearn_model}} writes, as verified by the parity tests in
+#' proximetricsr-estimators (\code{tests/test_r_export_parity.py}). Recorded in
+#' the exported file's \code{domain_version}/\code{packages} so openmodels warns
+#' when the loading environment differs. Update together with those tests.
+#' @keywords internal
+.sklearn_export_targets <- c(
+  sklearn = "1.9.1",
+  chemotools = "0.4.4",
+  proximetricsr_estimators = "0.1.0"
+)
 
 #' @title Translate one proximetricsR preprocessing step to a chemotools estimator dict
 #' @description internal function used by \code{\link{export_sklearn_model}}

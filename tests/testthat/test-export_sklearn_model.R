@@ -153,7 +153,7 @@ test_that("export_sklearn_model produces the expected Pipeline JSON shape", {
   expect_null(model_step$attributes$feature_names_in_)
 
   expect_equal(doc$metadata$domain, "sklearn")
-  expect_equal(doc$metadata$source, "proximetricsR")
+  expect_equal(doc$metadata$producer_name, "proximetricsR")
 })
 
 test_that("export_sklearn_model can write to a file", {
@@ -185,14 +185,31 @@ test_that("export_sklearn_model matches openmodels' documented dict shape", {
     if (!is.null(est$attributes)) expect_false(is.null(est$attribute_types))
   }
 
-  # producers lists exactly the packages contributing a class to this tree
+  meta <- doc$metadata
+  expect_equal(meta$openmodels_format_version, 3)
+  # producer_* is the tool that wrote the file (ONNX convention), not the root
+  # estimator's package.
+  expect_equal(meta$producer_name, "proximetricsR")
   expect_equal(
-    names(doc$metadata$producers),
+    meta$producer_version, as.character(utils::packageVersion("proximetricsR"))
+  )
+  # packages lists exactly the packages contributing a class to this tree, at
+  # the versions whose attribute layouts the export targets.
+  expect_equal(
+    names(meta$packages),
     c("chemotools", "proximetricsr_estimators", "sklearn")
   )
-  expect_equal(doc$metadata$producer_name, "sklearn")
-  expect_equal(doc$metadata$openmodels_format_version, 2)
-  # absent on purpose: R cannot know the scikit-learn version that will load
-  # this file, and openmodels skips its check when the field is missing.
-  expect_null(doc$metadata$producer_version)
+  expect_equal(
+    unlist(meta$packages),
+    proximetricsR:::.sklearn_export_targets[names(meta$packages)]
+  )
+  expect_equal(meta$domain_version, meta$packages$sklearn)
+  # dependency_versions is this R session's own runtime.
+  expect_equal(meta$dependency_versions$R, as.character(getRversion()))
+  # pre-v3 ad-hoc/placeholder fields are gone
+  for (field in c(
+    "source", "proximetricsR_version", "r_version", "producers", "openmodels_version"
+  )) {
+    expect_null(meta[[field]])
+  }
 })
