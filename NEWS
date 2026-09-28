@@ -1,6 +1,7 @@
 proximetricsR 0.7.2 "NewCastle"
 ===============
 * Fix: Corrected bias calculation for in `proxiscout_write_model_info`.
+* Fix: Removed the overly restrictive identification for repetitions in `proxiscout_read_data` that included the exact same measurement time.
 
 proximetricsR 0.7.1 "Valinhos"
 ===============

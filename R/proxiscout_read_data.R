@@ -221,7 +221,6 @@ proxiscout_read_data <- function(file, references_file) {
         # If there is a column for scanner or for the date, add them to the group key.
         # These are typically different for measurements that are not repeats.
         group_key <- add_regex_col(x, "^(scanner|device)[ _.-]?id$|^(scanner|device)[ _.-]?name$|^(scanner|device)$", group_key)
-        group_key <- add_regex_col(x, "^(capturedat|date)$", group_key)
         x[[".repetition_group"]] <- match(group_key, unique(group_key))
       }
     }
